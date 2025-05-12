@@ -79,12 +79,27 @@ After careful evaluation of various 3D rendering frameworks for the web, **Three
 
 To ensure 3D rendering only occurs on the client side and not during server-side rendering:
 
-1. The `'use client'` directive is used at the top of all components that interact with the 3D context.
-2. React's Suspense is utilized to handle the asynchronous nature of 3D asset loading.
-3. Components containing 3D elements are loaded dynamically using Next.js's dynamic imports with `{ssr: false}`.
-4. A fallback UI is displayed during loading to ensure a smooth user experience.
+1. The `'use client'` directive is used at the top of all components that interact with the 3D context, telling Next.js these components should only run in the browser.
+2. Component-level mounting checks are implemented using React's `useState` and `useEffect` hooks:
+   ```typescript
+   const [isMounted, setIsMounted] = useState(false);
+   
+   useEffect(() => {
+     setIsMounted(true);
+     return () => {
+       // Cleanup if needed
+     };
+   }, []);
+   
+   // Don't render the 3D scene during server-side rendering
+   if (!isMounted) {
+     return <LoadingFallback />;
+   }
+   ```
+3. React's Suspense is utilized to handle the asynchronous nature of 3D asset loading with appropriate fallback UI.
+4. Clear separation between client and server components ensures Three.js code only executes in the browser environment.
 
-This strategy prevents Three.js code from executing during server-side rendering, avoiding errors while maintaining the benefits of Next.js's hybrid rendering approach.
+This strategy ensures that Three.js initialization only happens on the client side, avoiding the DOM-dependent errors that would occur during server-side rendering while maintaining the benefits of Next.js's hybrid rendering approach.
 
 ## Architecture
 
@@ -134,18 +149,246 @@ Key files:
 
 ## Layer Interaction
 
-The layers interact as follows:
+The layers interact in a well-defined pattern that ensures separation of concerns while allowing effective communication:
 
-1. The **Presentation Layer** renders React components and handles user interactions.
-2. When the scene container mounts, it utilizes the **Integration Layer**.
-3. The **Integration Layer** sets up the 3D scene using data from the **Data Layer**.
-4. User interactions in the **Presentation Layer** are translated to API calls to the **Integration Layer**.
-5. The **Integration Layer** updates the 3D scene accordingly, using configurations from the **Data Layer**.
+### Data Flow Architecture
 
-This architecture allows for:
-- Easy swapping of 3D frameworks by only changing the Integration Layer
-- Updating scene configurations without touching rendering code
-- Adding UI components without modifying 3D logic
+```
+┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
+│  Presentation   │     │   Integration   │     │      Data       │
+│     Layer       │     │     Layer       │     │     Layer       │
+│                 │     │                 │     │                 │
+│  UI Components  │     │  3D Framework   │     │  Configuration  │
+│  User Events    │     │  Rendering      │     │  Assets         │
+│  State Mgmt     │     │  Scene Logic    │     │  Services       │
+└────────┬────────┘     └────────┬────────┘     └────────┬────────┘
+         │                       │                       │
+         ▼                       ▼                       ▼
+    Controls UI        Three.js/R3F Adapter       Scene Config
+    Interactions        Resource Management        Material Presets
+    Layout              Animation Logic            Asset Paths
+```
+
+### Specific Interaction Flow
+
+1. **Application Initialization**:
+   - The **Presentation Layer** (`SceneContainer`) mounts and determines it's running on the client
+   - It renders the **Integration Layer** component (`R3FScene`)
+   - The **Integration Layer** fetches configuration from the **Data Layer** (camera settings, materials, lighting)
+   - The scene initializes using these configurations
+
+2. **User Interaction Flow**:
+   - User interacts with controls in the **Presentation Layer** (`SceneControls` component)
+   - The **Presentation Layer** updates its state (toggles, sliders)
+   - Updated props flow down to the **Integration Layer**
+   - The **Integration Layer** applies these changes to the 3D scene without needing to know about UI details
+
+3. **Resource Management Flow**:
+   - The **Integration Layer** requests asset paths from the **Data Layer**
+   - The **Data Layer** provides these paths through its services
+   - The **Integration Layer** loads and manages these resources (textures, geometries)
+   - Loading progress is reported back to the **Presentation Layer** for UI updates
+
+4. **Direct Communication**:
+   - For specialized actions (e.g., camera reset), the **Presentation Layer** uses:
+     - React refs to expose methods from the **Integration Layer**
+     - Custom events (e.g., `resetCamera()` dispatches 'reset-camera' event)
+     - The **Integration Layer** listens for these events and responds accordingly
+
+This multi-directional communication pattern allows each layer to focus on its core responsibilities while maintaining a clean API surface between layers. The architecture enables:
+
+- Swapping the 3D framework by only changing the Integration Layer
+- Updating scene configurations without modifying rendering code
+- Adding UI components without touching 3D logic
+- Testing each layer independently
+
+## PBR and Transparency Implementation
+
+### PBR Materials
+This project implements physically-based rendering (PBR) using Three.js's MeshStandardMaterial. The implementation:
+
+- Uses multiple texture maps including albedo, normal, roughness, metalness, and ambient occlusion
+- Loads and applies these maps through the ResourceManager's async texture loading system
+- Creates appropriate UV2 coordinates for ambient occlusion maps
+- Configures proper color spaces for different texture types (SRGBColorSpace for color maps)
+
+The PBR workflow is implemented in the ResourceManager class:
+```typescript
+// Create a PBR material from texture maps
+public async createPBRMaterial(
+  textureAsset: TextureAsset, 
+  key: string = textureAsset.id,
+  isTransparent: boolean = false
+): Promise<THREE.MeshStandardMaterial> {
+  // Implementation loads each texture type and configures material properties
+}
+```
+
+Each material type (rusty metal, polished gold, etc.) is configured with appropriate physical properties to achieve realistic appearance based on real-world material characteristics.
+
+### Transparency Effects
+
+The glass sphere demonstrates advanced transparency effects using:
+
+- MeshPhysicalMaterial with specialized properties:
+  ```typescript
+  const material = new THREE.MeshPhysicalMaterial({
+    name: key,
+    color: new THREE.Color(0xffffff),
+    metalness: 0.0,
+    roughness: 0.05,
+    transmission: 0.95,  // Light transmission for glass effect
+    thickness: 0.5,      // Material thickness for refraction
+    ior: 1.5,            // Index of refraction (glass = ~1.5)
+    transparent: true,
+    opacity: 0.9,
+    envMapIntensity: 1,
+  });
+  ```
+- Render order management to ensure correct transparent object rendering:
+  ```tsx
+  <mesh 
+    renderOrder={2}  // Higher render order for transparent objects
+    // ...other props
+  />
+  ```
+- Double-sided rendering for proper refraction effects
+- Environment mapping to create realistic reflections on transparent surfaces
+
+## Challenges and Solutions
+
+### Technical Challenges
+
+During development, several challenges were encountered and addressed:
+
+1. **WebGL Context Management**: WebGL contexts can be lost unexpectedly. This was solved by implementing context loss/restoration event handlers:
+   ```typescript
+   function HandleContextLoss() {
+     const { gl } = useThree();
+     
+     useEffect(() => {
+       const handleContextLost = (event: Event) => {
+         event.preventDefault();
+       };
+       
+       const handleContextRestored = () => {
+         // Handle restoration
+       };
+       
+       canvas.addEventListener('webglcontextlost', handleContextLost);
+       canvas.addEventListener('webglcontextrestored', handleContextRestored);
+       
+       // Cleanup
+     }, [gl]);
+   }
+   ```
+
+2. **Correct Transparency Rendering**: Ensuring proper rendering of transparent objects required careful management of material properties, render order, and depth writing.
+
+3. **PBR Texture Coordination**: Coordinating multiple texture maps (albedo, normal, roughness, etc.) while ensuring proper loading and error handling required a robust resource management system.
+
+### Performance Optimizations
+
+Several optimizations were implemented to ensure smooth performance:
+
+1. **Resource Pooling**: Geometries are created once and reused to reduce memory usage and initialization time:
+   ```typescript
+   public getPlaneGeometry(width, height, widthSegments, heightSegments, key) {
+     // Check cache first before creating new geometry
+     if (this.geometries.has(key)) {
+       return this.geometries.get(key) as THREE.PlaneGeometry;
+     }
+     
+     // Create and cache if not found
+     const geometry = new THREE.PlaneGeometry(width, height, widthSegments, heightSegments);
+     this.geometries.set(key, geometry);
+     return geometry;
+   }
+   ```
+
+2. **Texture Caching**: Textures are loaded once and cached to prevent duplicate loading:
+   ```typescript
+   public loadTexture(url: string, key: string = url): Promise<THREE.Texture> {
+     if (this.textures.has(key)) {
+       return Promise.resolve(this.textures.get(key)!);
+     }
+     
+     // Load and cache if not found
+   }
+   ```
+
+3. **Component Memoization**: React components are memoized to prevent unnecessary re-renders:
+   ```typescript
+   const PBRSphere = React.memo(({ position, textureSetId, radius = 0.8 }) => {
+     // Component implementation
+   });
+   ```
+
+4. **Progress Tracking**: Loading progress is tracked to provide feedback to users during asset loading.
+
+## Resource Management and Cleanup Strategy
+
+To prevent memory leaks, this application implements a comprehensive resource management strategy through the ResourceManager class:
+
+1. **Centralized Resource Tracking**: All Three.js resources (textures, materials, geometries) are tracked in Maps:
+   ```typescript
+   private textures: Map<string, THREE.Texture> = new Map();
+   private materials: Map<string, THREE.Material> = new Map();
+   private geometries: Map<string, THREE.BufferGeometry> = new Map();
+   ```
+
+2. **Explicit Disposal**: When components unmount or the scene changes, resources are properly disposed:
+   ```typescript
+   public dispose(): void {
+     this.textures.forEach((texture) => {
+       texture.dispose();
+     });
+     this.textures.clear();
+     
+     this.materials.forEach((material) => {
+       material.dispose();
+     });
+     this.materials.clear();
+     
+     this.geometries.forEach((geometry) => {
+       geometry.dispose();
+     });
+     this.geometries.clear();
+   }
+   ```
+
+3. **React Lifecycle Integration**: Cleanup is tied to React's component lifecycle:
+   ```typescript
+   useEffect(() => {
+     // Setup code
+     
+     return () => {
+       // Clear scene
+       while (scene.children.length > 0) {
+         const object = scene.children[0];
+         scene.remove(object);
+       }
+       
+       // Dispose resources
+       resourceManager.dispose();
+     };
+   }, [scene, gl]);
+   ```
+
+4. **Individual Resource Disposal**: Granular disposal functions for individual resources:
+   ```typescript
+   public disposeTexture(key: string): boolean {
+     const texture = this.textures.get(key);
+     if (texture) {
+       texture.dispose();
+       this.textures.delete(key);
+       return true;
+     }
+     return false;
+   }
+   ```
+
+This comprehensive approach ensures that all GPU resources are properly released when no longer needed, preventing the memory leaks that commonly plague WebGL applications.
 
 ## Getting Started
 
@@ -182,26 +425,3 @@ You can check out [the Next.js GitHub repository](https://github.com/vercel/next
 The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
 
 Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
-
-## PBR and Transparency Implementation
-
-### PBR Materials
-This project implements physically-based rendering (PBR) using Three.js's MeshStandardMaterial. The implementation:
-
-- Uses multiple texture maps including albedo, normal, roughness, metalness, and ambient occlusion
-- Implements proper resource management through the ResourceManager class
-- Supports material parameter adjustment via UI controls
-
-The texture loading process is handled by the resourceManager, which:
-1. Loads textures asynchronously
-2. Creates appropriate materials based on texture sets
-3. Applies proper properties based on material type
-4. Caches resources to prevent duplicate loading
-
-### Transparency Effects
-The glass sphere demonstrates advanced transparency effects using:
-
-- MeshPhysicalMaterial with transmission, thickness, and IOR properties
-- Double-sided rendering for proper refraction
-- Render order management to ensure correct transparency layering
-- Proper depth writing configuration for transparent objects
