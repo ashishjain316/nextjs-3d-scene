@@ -5,7 +5,7 @@
  * Implements SceneAPI using React Three Fiber
  */
 
-import React, { useRef, useEffect, useState } from 'react';
+import React, { useRef, useEffect, useState, forwardRef, useImperativeHandle } from 'react';
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import { 
   Environment, 
@@ -38,6 +38,10 @@ interface R3FSceneProps {
   metallic?: number;
 }
 
+export interface R3FSceneRef {
+  resetCamera: () => void;
+}
+
 function HandleContextLoss() {
   const { gl } = useThree();
   
@@ -64,25 +68,27 @@ function HandleContextLoss() {
   return null;
 }
 
-function CameraController({ autoRotate = false }: { autoRotate: boolean }) {
+function CameraController({ autoRotate = false, cameraControllerRef }: { 
+  autoRotate: boolean; 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  cameraControllerRef: React.MutableRefObject<any>;
+}) {
   // Using any is acceptable here since we're dealing with a drei component
   // that has runtime properties not fully represented in its TypeScript definition
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const controlsRef = useRef<any>(null);
   const { camera } = useThree();
   
+  // Assign the controls ref to the forwarded ref
   useEffect(() => {
-    const handleResetCamera = () => {
-      if (!controlsRef.current) return;
-      
-      camera.position.set(...cameraConfig.position);
-      controlsRef.current.target.set(0, 0, 0);
-      controlsRef.current.update();
-    };
-    
-    window.addEventListener('reset-camera', handleResetCamera);
-    return () => window.removeEventListener('reset-camera', handleResetCamera);
-  }, [camera]);
+    if (controlsRef.current) {
+      // Store both the controls and camera in the ref
+      cameraControllerRef.current = {
+        controls: controlsRef.current,
+        camera
+      };
+    }
+  }, [controlsRef, cameraControllerRef, camera]);
   
   return (
     <OrbitControls 
@@ -171,130 +177,156 @@ function Floor({ position, rotation, material, geometry }: {
   );
 }
 
-export function R3FScene({ 
-  autoRotate = false, 
-  enableBloom = false,
-  enableDepthOfField = false,
-  enableNoise = false,
-  showLights = true, 
-  metallic = 0.5 
-}: R3FSceneProps) {
-  const [hasError, setHasError] = useState(false);
-  const [retryCount, setRetryCount] = useState(0);
-  
-  if (hasError && retryCount >= 3) {
-    return (
-      <div className="flex items-center justify-center h-full w-full p-8 text-center">
-        <div>
-          <h2 className="text-xl font-bold mb-4">WebGL Error</h2>
-          <p className="mb-4">
-            There was an error initializing the 3D scene.
-            This might be due to limited graphics capabilities or memory.
-          </p>
-          <button 
-            onClick={() => window.location.reload()}
-            className="scene-button scene-button-blue"
-          >
-            Reload Page
-          </button>
+const R3FSceneComponent = forwardRef<R3FSceneRef, R3FSceneProps>(
+  function R3FSceneWithRef({ 
+    autoRotate = false, 
+    enableBloom = false,
+    enableDepthOfField = false,
+    enableNoise = false,
+    showLights = true, 
+    metallic = 0.5 
+  }, ref) {
+    const [hasError, setHasError] = useState(false);
+    const [retryCount, setRetryCount] = useState(0);
+    // Ref to access camera controls
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const cameraControllerRef = useRef<any>(null);
+    
+    // Expose the resetCamera method via ref
+    useImperativeHandle(ref, () => ({
+      resetCamera: () => {
+        if (cameraControllerRef.current) {
+          const { controls, camera } = cameraControllerRef.current;
+          // Reset camera position through the controller
+          camera.position.set(...cameraConfig.position);
+          // Reset target look-at point
+          controls.target.set(0, 0, 0);
+          // Update controls
+          controls.update();
+        }
+      }
+    }));
+    
+    if (hasError && retryCount >= 3) {
+      return (
+        <div className="flex items-center justify-center h-full w-full p-8 text-center">
+          <div>
+            <h2 className="text-xl font-bold mb-4">WebGL Error</h2>
+            <p className="mb-4">
+              There was an error initializing the 3D scene.
+              This might be due to limited graphics capabilities or memory.
+            </p>
+            <button 
+              onClick={() => window.location.reload()}
+              className="scene-button scene-button-blue"
+            >
+              Reload Page
+            </button>
+          </div>
         </div>
-      </div>
+      );
+    }
+    
+    return (
+      <Canvas 
+        shadows 
+        dpr={rendererConfig.pixelRatio} 
+        gl={{ 
+          powerPreference: 'high-performance', 
+          antialias: false,
+          alpha: false,
+          stencil: false,
+          depth: true
+        }}
+        style={{ background: rendererConfig.backgroundColor }}
+        frameloop={rendererConfig.frameloop as "always" | "demand" | "never"}
+        performance={rendererConfig.performance as PerformanceSettings}
+        onError={() => {
+          setHasError(true);
+          setRetryCount(prev => prev + 1);
+        }}
+      >
+        <HandleContextLoss />
+        <PerspectiveCamera 
+          makeDefault 
+          position={cameraConfig.position}
+          fov={cameraConfig.fov}
+          near={cameraConfig.near}
+          far={cameraConfig.far}
+        />
+        <CameraController 
+          autoRotate={autoRotate} 
+          cameraControllerRef={cameraControllerRef}
+        />
+        
+        <color attach="background" args={[rendererConfig.backgroundColor]} />
+        
+        <ambientLight intensity={lightingConfig.ambient.intensity} />
+        
+        {showLights && (
+          <>
+            <spotLight 
+              position={lightingConfig.spot.position} 
+              angle={lightingConfig.spot.angle} 
+              penumbra={lightingConfig.spot.penumbra} 
+              intensity={lightingConfig.spot.intensity} 
+              castShadow={lightingConfig.spot.castShadow} 
+              shadow-mapSize={lightingConfig.spot.shadowMapSize}
+            />
+            <pointLight position={[-3, 3, -2]} intensity={0.4} />
+          </>
+        )}
+        
+        <AnimatedSphere 
+          id="glassSphere"
+          position={sceneObjects.glassSphere.position}
+          material="glass"
+          animation={sceneObjects.glassSphere.animation}
+          geometry={sceneObjects.glassSphere.geometry}
+        />
+        
+        <AnimatedSphere 
+          id="metalSphere"
+          position={sceneObjects.metalSphere.position}
+          material="metal"
+          animation={sceneObjects.metalSphere.animation}
+          geometry={sceneObjects.metalSphere.geometry}
+          metallicOverride={metallic}
+        />
+        
+        <AnimatedSphere 
+          id="rustSphere"
+          position={sceneObjects.rustSphere.position}
+          material="rust"
+          animation={sceneObjects.rustSphere.animation}
+          geometry={sceneObjects.rustSphere.geometry}
+          metallicOverride={metallic}
+        />
+        
+        <Floor 
+          position={sceneObjects.floor.position}
+          rotation={sceneObjects.floor.rotation}
+          material="floor"
+          geometry={sceneObjects.floor.geometry}
+        />
+        
+        <Environment 
+          preset={environmentConfig.preset} 
+          background={environmentConfig.background} 
+        />
+        
+        <EffectComposer enabled={enableBloom || enableDepthOfField || enableNoise}>
+          {/* @ts-expect-error - React Three Fiber types are sometimes incompatible with React's types */}
+          {[
+            enableBloom && <Bloom key="bloom" luminanceThreshold={0.2} luminanceSmoothing={0.9} intensity={1.5} />,
+            enableDepthOfField && <DepthOfField key="dof" focusDistance={0.2} focalLength={0.5} bokehScale={3} />,
+            enableNoise && <Noise key="noise" opacity={0.15} />
+          ].filter(Boolean)}
+        </EffectComposer>
+      </Canvas>
     );
   }
-  
-  return (
-    <Canvas 
-      shadows 
-      dpr={rendererConfig.pixelRatio} 
-      gl={{ 
-        powerPreference: 'high-performance', 
-        antialias: false,
-        alpha: false,
-        stencil: false,
-        depth: true
-      }}
-      style={{ background: rendererConfig.backgroundColor }}
-      frameloop={rendererConfig.frameloop as "always" | "demand" | "never"}
-      performance={rendererConfig.performance as PerformanceSettings}
-      onError={() => {
-        setHasError(true);
-        setRetryCount(prev => prev + 1);
-      }}
-    >
-      <HandleContextLoss />
-      <PerspectiveCamera 
-        makeDefault 
-        position={cameraConfig.position}
-        fov={cameraConfig.fov}
-        near={cameraConfig.near}
-        far={cameraConfig.far}
-      />
-      <CameraController autoRotate={autoRotate} />
-      
-      <color attach="background" args={[rendererConfig.backgroundColor]} />
-      
-      <ambientLight intensity={lightingConfig.ambient.intensity} />
-      
-      {showLights && (
-        <>
-          <spotLight 
-            position={lightingConfig.spot.position} 
-            angle={lightingConfig.spot.angle} 
-            penumbra={lightingConfig.spot.penumbra} 
-            intensity={lightingConfig.spot.intensity} 
-            castShadow={lightingConfig.spot.castShadow} 
-            shadow-mapSize={lightingConfig.spot.shadowMapSize}
-          />
-          <pointLight position={[-3, 3, -2]} intensity={0.4} />
-        </>
-      )}
-      
-      <AnimatedSphere 
-        id="glassSphere"
-        position={sceneObjects.glassSphere.position}
-        material="glass"
-        animation={sceneObjects.glassSphere.animation}
-        geometry={sceneObjects.glassSphere.geometry}
-      />
-      
-      <AnimatedSphere 
-        id="metalSphere"
-        position={sceneObjects.metalSphere.position}
-        material="metal"
-        animation={sceneObjects.metalSphere.animation}
-        geometry={sceneObjects.metalSphere.geometry}
-        metallicOverride={metallic}
-      />
-      
-      <AnimatedSphere 
-        id="rustSphere"
-        position={sceneObjects.rustSphere.position}
-        material="rust"
-        animation={sceneObjects.rustSphere.animation}
-        geometry={sceneObjects.rustSphere.geometry}
-        metallicOverride={metallic}
-      />
-      
-      <Floor 
-        position={sceneObjects.floor.position}
-        rotation={sceneObjects.floor.rotation}
-        material="floor"
-        geometry={sceneObjects.floor.geometry}
-      />
-      
-      <Environment 
-        preset={environmentConfig.preset} 
-        background={environmentConfig.background} 
-      />
-      
-      <EffectComposer enabled={enableBloom || enableDepthOfField || enableNoise}>
-        {/* @ts-expect-error - React Three Fiber types are sometimes incompatible with React's types */}
-        {[
-          enableBloom && <Bloom key="bloom" luminanceThreshold={0.2} luminanceSmoothing={0.9} intensity={1.5} />,
-          enableDepthOfField && <DepthOfField key="dof" focusDistance={0.2} focalLength={0.5} bokehScale={3} />,
-          enableNoise && <Noise key="noise" opacity={0.15} />
-        ].filter(Boolean)}
-      </EffectComposer>
-    </Canvas>
-  );
-}
+);
+
+// Export the component with the ref
+export const R3FScene = R3FSceneComponent;

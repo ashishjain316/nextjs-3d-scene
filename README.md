@@ -192,8 +192,9 @@ The layers interact in a well-defined pattern that ensures separation of concern
 4. **Direct Communication**:
    - For specialized actions (e.g., camera reset), the **Presentation Layer** uses:
      - React refs to expose methods from the **Integration Layer**
-     - Custom events (e.g., `resetCamera()` dispatches 'reset-camera' event)
-     - The **Integration Layer** listens for these events and responds accordingly
+     - Direct method calls through forwarded refs
+     - The **Integration Layer** exposes a clean API via `useImperativeHandle`
+
 
 This multi-directional communication pattern allows each layer to focus on its core responsibilities while maintaining a clean API surface between layers. The architecture enables:
 

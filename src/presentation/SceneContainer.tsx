@@ -5,8 +5,9 @@
  * Responsible for rendering the 3D scene and handling UI interactions
  */
 
-import React, { Suspense, useEffect, useState, forwardRef, useImperativeHandle } from 'react';
+import React, { Suspense, useEffect, useState, forwardRef, useImperativeHandle, useRef } from 'react';
 import { R3FScene } from '../integration';
+import type { R3FSceneRef } from '../integration/r3fAdapter';
 import LoadingFallback from '../app/components/LoadingFallback';
 
 interface SceneContainerProps {
@@ -24,7 +25,6 @@ export interface SceneContainerHandle {
   resetCamera: () => void;
 }
 
-
 const SceneContainer = forwardRef<SceneContainerHandle, SceneContainerProps>(
   function SceneContainer({ 
     className = "", 
@@ -36,12 +36,13 @@ const SceneContainer = forwardRef<SceneContainerHandle, SceneContainerProps>(
     metallic = 0.5
   }, ref) {
     const [isMounted, setIsMounted] = useState(false);
+    const sceneRef = useRef<R3FSceneRef>(null);
     
-    // Expose camera reset method to parent component
+    // Expose camera reset method to parent component using direct ref method calls
     useImperativeHandle(ref, () => ({
       resetCamera: () => {
-        // Use custom event to communicate with the camera controller in r3fAdapter
-        window.dispatchEvent(new CustomEvent('reset-camera'));
+        // Call the scene's resetCamera method directly
+        sceneRef.current?.resetCamera();
       }
     }));
     
@@ -62,6 +63,7 @@ const SceneContainer = forwardRef<SceneContainerHandle, SceneContainerProps>(
       <div className={`w-full h-full relative rounded-lg overflow-hidden ${className}`}>
         <Suspense fallback={<LoadingFallback />}>
           <R3FScene 
+            ref={sceneRef}
             autoRotate={autoRotate} 
             enableBloom={enableBloom}
             enableDepthOfField={enableDepthOfField}
